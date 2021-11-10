@@ -8,13 +8,14 @@
 #include <tlhelp32.h>
 #include <vector>
 
-bool InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
+DWORD InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
   const uint32_t ProcessRights =
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
       PROCESS_VM_WRITE | PROCESS_VM_READ;
   const HANDLE Process = OpenProcess(ProcessRights, false, ProcessId);
 
   if (Process == nullptr) {
+    printf("Failed to open the remote process.\n");
     return EXIT_FAILURE;
   }
 
@@ -56,6 +57,7 @@ bool InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
     printf("CreateRemoteThread failed.\n");
     return EXIT_FAILURE;
   }
+  printf("Thread with ID %d has been created.\n", Tid);
 
   WaitForSingleObject(Thread, INFINITE);
 
@@ -64,12 +66,15 @@ bool InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
 
   if (ExitCode == 0) {
     printf("/!\\ The thread failed to load the dll.\n");
+    return EXIT_FAILURE;
   }
+
+  printf("The remote thread exited with error code: %#x.\n", ExitCode);
 
   CloseHandle(Thread);
   VirtualFreeEx(Process, RemoteDllPath, 0, MEM_RELEASE);
   CloseHandle(Process);
-  return ExitCode != 0;
+  return EXIT_SUCCESS;
 }
 
 bool Pid2Name(const char *ProcessName, uint32_t &Pid) {
@@ -132,8 +137,8 @@ int main(int Argc, const char *Argv[]) {
 
   for (const std::filesystem::path &Dll : Dlls) {
     const std::filesystem::path DllAbsolute = std::filesystem::absolute(Dll);
-    const bool Succeed = InjectDll(ProcessId, DllAbsolute);
-    if (!Succeed) {
+    const DWORD Succeed = InjectDll(ProcessId, DllAbsolute);
+    if (Succeed == EXIT_FAILURE) {
       printf("Error while injecting %ls in %d\n", DllAbsolute.c_str(),
              ProcessId);
       return EXIT_FAILURE;
