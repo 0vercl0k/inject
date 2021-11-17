@@ -174,7 +174,7 @@ int main(int Argc, const char *Argv[]) {
   for (const std::filesystem::path &Dll : Dlls) {
     const std::filesystem::path DllAbsolute = std::filesystem::absolute(Dll);
     const DWORD Succeed = InjectDll(ProcessId, DllAbsolute);
-    if (Succeed == EXIT_FAILURE) {
+    if (!Succeed) {
       printf("Error while injecting %ls in %d\n", DllAbsolute.c_str(),
              ProcessId);
       return EXIT_FAILURE;
