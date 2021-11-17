@@ -8,7 +8,6 @@
 #include <tlhelp32.h>
 #include <vector>
 
-
 HANDLE OpenRemoteProcess(const uint32_t ProcessId) {
   const uint32_t ProcessRights =
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
@@ -23,86 +22,76 @@ HANDLE OpenRemoteProcess(const uint32_t ProcessId) {
   return Process;
 }
 
-PVOID AllocateMemInRemoteProcess(HANDLE hRemoteProcess,
+PVOID AllocateMemInRemoteProcess(HANDLE RemoteProcess,
                                  const std::filesystem::path &Path) {
-  const std::string DllPath = Path.string();
-  const size_t DllPathLen = DllPath.size() + 1;
-  SIZE_T BytesWritten;
-
-  const PVOID RemoteDllPath = VirtualAllocEx(hRemoteProcess, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE,
+  const PVOID RemoteDllPath = VirtualAllocEx(RemoteProcess, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE,
                      PAGE_READWRITE);
 
   if (RemoteDllPath == nullptr) {
     printf("VirtualAllocEx failed.\n");
-    goto Error;
+    return nullptr;
   }
 
-  if (!WriteProcessMemory(hRemoteProcess, RemoteDllPath, DllPath.c_str(),
+  const std::string DllPath = Path.string();
+  const size_t DllPathLen = DllPath.size() + 1;
+  SIZE_T BytesWritten;
+  if (!WriteProcessMemory(RemoteProcess, RemoteDllPath, DllPath.c_str(),
                           DllPathLen,
                           &BytesWritten)) {
-    VirtualFreeEx(hRemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
+    VirtualFreeEx(RemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
     printf("WriteProcessMemory failed.\n");
-    goto Error;
+    return nullptr;
   }
 
   return RemoteDllPath;
-
-Error:
-  CloseHandle(hRemoteProcess);
-  return nullptr;
 }
 
-HANDLE CreateThreadInRemoteProcess(HANDLE hRemoteProcess, PVOID RemoteDllPath) {
-  PVOID LoadLibraryA;
-  HANDLE Thread;
-  DWORD Tid;
-
+HANDLE CreateThreadInRemoteProcess(HANDLE RemoteProcess, PVOID RemoteDllPath) {
   const HMODULE Kernelbase = GetModuleHandleA("kernelbase");
   if (Kernelbase == nullptr) {
     printf("GetModuleHandleA failed.\n");
-    goto Error;
+    return INVALID_HANDLE_VALUE;
   }
 
-  LoadLibraryA = PVOID(GetProcAddress(Kernelbase, "LoadLibraryA"));
+  const PVOID LoadLibraryA = PVOID(GetProcAddress(Kernelbase, "LoadLibraryA"));
   if (LoadLibraryA == nullptr) {
     printf("GetProcAddress failed.\n");
-    goto Error;
+    return INVALID_HANDLE_VALUE;
   }
 
-  Thread = CreateRemoteThread(hRemoteProcess, nullptr, 0,
+  DWORD Tid = 0;
+  const HANDLE Thread = CreateRemoteThread(RemoteProcess, nullptr, 0,
                                            LPTHREAD_START_ROUTINE(LoadLibraryA),
                                            RemoteDllPath, 0, &Tid);
 
-  if (Thread == NULL) {
+  if (Thread == nullptr) {
     printf("CreateRemoteThread failed.\n");
-    goto Error;
+    return INVALID_HANDLE_VALUE;
   }
 
   printf("Thread with ID %d has been created.\n", Tid);
 
   return Thread;
-
-Error:
-  VirtualFreeEx(hRemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
-  CloseHandle(hRemoteProcess);
-  return INVALID_HANDLE_VALUE;
 }
 
-DWORD InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
-  DWORD InjectResult = EXIT_FAILURE;
+bool InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
+  bool InjectResult = false;
 
-  HANDLE hRemoteProcess = OpenRemoteProcess(ProcessId);
-  if (hRemoteProcess == INVALID_HANDLE_VALUE) {
+  HANDLE RemoteProcess = OpenRemoteProcess(ProcessId);
+  if (RemoteProcess == INVALID_HANDLE_VALUE) {
     return InjectResult;
   }
   
-  const PVOID RemoteDllPath = AllocateMemInRemoteProcess(hRemoteProcess, Path);
+  const PVOID RemoteDllPath = AllocateMemInRemoteProcess(RemoteProcess, Path);
   if (RemoteDllPath == nullptr) {
+    CloseHandle(RemoteProcess);
     return InjectResult;
   }
 
-  const HANDLE Thread = CreateThreadInRemoteProcess(hRemoteProcess, RemoteDllPath);
+  const HANDLE Thread = CreateThreadInRemoteProcess(RemoteProcess, RemoteDllPath);
   if (Thread == INVALID_HANDLE_VALUE) {
+    VirtualFreeEx(RemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
+    CloseHandle(RemoteProcess);
     return InjectResult;
   }
 
@@ -110,16 +99,16 @@ DWORD InjectDll(const uint32_t ProcessId, const std::filesystem::path &Path) {
 
   DWORD ExitCode = 0;
   GetExitCodeThread(Thread, &ExitCode);
-  InjectResult = EXIT_SUCCESS;
+  InjectResult = true;
 
   if (ExitCode == 0) {
     printf("/!\\ The thread failed to load the dll. ");
-    InjectResult = EXIT_FAILURE;
+    InjectResult = false;
   }
 
   CloseHandle(Thread);
-  VirtualFreeEx(hRemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
-  CloseHandle(hRemoteProcess);
+  VirtualFreeEx(RemoteProcess, RemoteDllPath, 0, MEM_RELEASE);
+  CloseHandle(RemoteProcess);
   return InjectResult;
 }
 
@@ -183,8 +172,8 @@ int main(int Argc, const char *Argv[]) {
 
   for (const std::filesystem::path &Dll : Dlls) {
     const std::filesystem::path DllAbsolute = std::filesystem::absolute(Dll);
-    const DWORD Succeed = InjectDll(ProcessId, DllAbsolute);
-    if (Succeed == EXIT_FAILURE) {
+    const bool Succeed = InjectDll(ProcessId, DllAbsolute);
+    if (!Succeed) {
       printf("Error while injecting %ls in %d\n", DllAbsolute.c_str(),
              ProcessId);
       return EXIT_FAILURE;
